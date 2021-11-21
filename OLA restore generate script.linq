@@ -22,58 +22,29 @@ void Main()
 
 	var s = GenerateRestoreScript(serverName, dbName, olaRootBackupFolder, restorePointInTime);
 	
+	Console.WriteLine("USE [master]" + Environment.NewLine);	
 	Console.WriteLine(s);
 }
 
-public string GenerateRestoreScript(string serverName, string dbName, string olaBackupFolder, DateTime restorePointInTime)
+public string GenerateRestoreScript(string serverName, string dbName, string olaRootBackupFolder, DateTime restorePointInTime)
 {
-	string cmd;
-	
-	var fullbackups = GetBackupFiles(serverName, dbName, olaBackupFolder, BackupType.FULL);
-
-	if (fullbackups.Count == 0)
-	{
-		return "-- No full backups found.";
-	}
-
-	// get most recent backup file less than or equal to the specified point in time
-	var mostRecentBackup = fullbackups.Where(x => x.FileDate <= restorePointInTime).FirstOrDefault();
-
+	var mostRecentBackup = GetMostRecentMatchingFullBackup(serverName, dbName, olaRootBackupFolder, restorePointInTime);
 	if (mostRecentBackup == null)
+		return "";
+	string cmd = mostRecentBackup.GenerateRestoreStatement(dbName, null);
+
+	var mostRecentDiffBackup = GetMostRecentMatchingDiffBackup(serverName, dbName, olaRootBackupFolder, restorePointInTime, mostRecentBackup.FileDate, out DateTime tlogsAfter);
+	if (mostRecentDiffBackup == null)
 	{
-		return $"-- No full backup found that matches the given point in time: {restorePointInTime.ToShortDateString()}";
-	}
-
-	cmd = "USE [master]" + Environment.NewLine;
-
-	cmd += mostRecentBackup.GenerateRestoreStatement(dbName, null);
-
-	var diffbackups = GetBackupFiles(serverName, dbName, olaBackupFolder, BackupType.DIFF);
-	DateTime tlogsAfter;
-	if (diffbackups.Count > 0)
-	{
-		var diffBackup = diffbackups.Where(x => x.FileDate <= restorePointInTime && x.FileDate >= mostRecentBackup.FileDate).FirstOrDefault();
-
-		if (diffBackup == null)
-		{
-			cmd += "-- No diff backup matches the given point in time, will attempt to generate restore TLog chain...";
-			tlogsAfter = mostRecentBackup.FileDate;
-		}
-		else
-		{
-			cmd += diffBackup.GenerateRestoreStatement(dbName, restorePointInTime);
-		}
-
-		tlogsAfter = diffBackup.FileDate;
+		Console.WriteLine("-- No diff backup matches the given point in time, will attempt to generate restore TLog chain...");
 	}
 	else
 	{
-		tlogsAfter = mostRecentBackup.FileDate;
+		cmd += mostRecentDiffBackup.GenerateRestoreStatement(dbName, restorePointInTime);		
 	}
 
-	var tlogs = GetBackupFiles(serverName, dbName, olaBackupFolder, BackupType.TLOG);
+	var tlogs = GetBackupFiles(serverName, dbName, olaRootBackupFolder, BackupType.TLOG);
 	var tlogsToApply = tlogs.Where(x => x.FileDate <= restorePointInTime && x.FileDate >= tlogsAfter).ToList();
-
 	foreach (var log in tlogsToApply)
 	{
 		cmd += log.GenerateRestoreStatement(dbName, restorePointInTime);
@@ -83,6 +54,67 @@ public string GenerateRestoreScript(string serverName, string dbName, string ola
 	
 	return cmd;
 }
+
+public BackupFile GetMostRecentMatchingFullBackup(string serverName, string dbName, string olaRootBackupFolder, DateTime restorePointInTime)
+{
+	var fullbackups = GetBackupFiles(serverName, dbName, olaRootBackupFolder, BackupType.FULL);
+	
+	if (fullbackups.Count == 0)
+	{
+		Console.WriteLine("-- No full backups found.");
+		return null;
+	}
+
+	// get most recent backup file less than or equal to the specified point in time
+	var mostRecentBackup = fullbackups.Where(x => x.FileDate <= restorePointInTime).FirstOrDefault();
+	if (mostRecentBackup == null)
+	{
+		Console.WriteLine($"-- No full backup found that matches the given point in time: {restorePointInTime.ToShortDateString()}");
+		return null;
+	}
+	
+	return mostRecentBackup;
+}
+
+public BackupFile GetMostRecentMatchingDiffBackup(string serverName, string dbName, string olaRootBackupFolder, DateTime restorePointInTime, DateTime mostRecentBackupDatetime, out DateTime tlogsAfter)
+{
+	var diffbackups = GetBackupFiles(serverName, dbName, olaRootBackupFolder, BackupType.DIFF);
+	BackupFile mostRecentDiffBackup = null;
+
+	if (diffbackups.Count > 0)
+	{
+		mostRecentDiffBackup = diffbackups.Where(x => x.FileDate <= restorePointInTime && x.FileDate >= mostRecentBackupDatetime).FirstOrDefault();
+		tlogsAfter = mostRecentDiffBackup.FileDate;
+	}
+	else
+	{
+		tlogsAfter = mostRecentBackupDatetime;
+	}
+	
+	return mostRecentDiffBackup;
+}
+
+public BackupFile GetMostRecentMatchingBackup(string serverName, string dbName, string olaRootBackupFolder, DateTime restorePointInTime)
+{
+	var fullbackups = GetBackupFiles(serverName, dbName, olaRootBackupFolder, BackupType.FULL);
+
+	if (fullbackups.Count == 0)
+	{
+		Console.WriteLine("-- No full backups found.");
+		return null;
+	}
+
+	// get most recent backup file less than or equal to the specified point in time
+	var mostRecentBackup = fullbackups.Where(x => x.FileDate <= restorePointInTime).FirstOrDefault();
+	if (mostRecentBackup == null)
+	{
+		Console.WriteLine($"-- No full backup found that matches the given point in time: {restorePointInTime.ToShortDateString()}");
+		return null;
+	}
+
+	return mostRecentBackup;
+}
+
 
 public enum BackupType
 {
