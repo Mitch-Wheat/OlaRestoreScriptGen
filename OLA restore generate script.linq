@@ -7,57 +7,79 @@ void Main()
 	//
 	// Procedure:
 	// 1. Find most recent FULL backup less than or equal to the specified date
-	// 2. Look for any Differential backups; if found apply the latest DIFF backup less than or equal to the specified date
+	// 2. Look for any Differential backups after the FULL backup date; if found apply the latest DIFF backup less than or equal to the specified date
 	// 3. Apply any TLOG backups up to the specified date 
 	// 4. Take database out of recovery mode.
+	
+	var options = new Options();
 
-	string serverName = "K7";
-	string dbName = "AdventureWorks";
-	string olaRootBackupFolder = @"C:\temp\Backup\";
+	options.SourceServerName = "K7";
+	options.SourceDbName = "AdventureWorks";
+	options.OlaRootBackupFolder = @"C:\temp\Backup\";
+	
+	options.TargetDbName = @"Copy of AdventureWorks";
+	options.TargetServerName = "K7";		
+	options.TargetDbDataFilesLocation = @"C:\TempSqlDataFiles\DATA";  // null or empty means same folder structure as source
+	options.TargetDbTLogFilesLocation = @"C:\TempSqlDataFiles\LOGS";  // null or empty means same folder structure as source
 
 	// Point in time: (year, month, day, hours, minutes, seconds)
-	//DateTime restorePointInTime = new DateTime(2021, 11, 18, 16, 00, 00);
+	//o.restorePointInTime = new DateTime(2021, 11, 18, 16, 15, 00);
 	// ...or latest available
-	DateTime restorePointInTime = DateTime.Now;
+	options.RestorePointInTime = DateTime.Now;
 
-	var s = GenerateRestoreScript(serverName, dbName, olaRootBackupFolder, restorePointInTime);
+	var s = GenerateRestoreScript(options);
 	
 	Console.WriteLine("USE [master]" + Environment.NewLine);	
 	Console.WriteLine(s);
 }
 
-public string GenerateRestoreScript(string serverName, string dbName, string olaRootBackupFolder, DateTime restorePointInTime)
+public class Options
 {
-	var mostRecentBackup = GetMostRecentMatchingFullBackup(serverName, dbName, olaRootBackupFolder, restorePointInTime);
+	public string SourceServerName;
+	public string SourceDbName;
+	public string OlaRootBackupFolder;
+	
+	public string TargetServerName;	
+	public string TargetDbName;
+	public string TargetDbDataFilesLocation;
+	public string TargetDbTLogFilesLocation;
+	
+	public DateTime RestorePointInTime;
+} 
+
+
+public string GenerateRestoreScript(Options o)
+{
+	var mostRecentBackup = GetMostRecentMatchingFullBackup(o);
 	if (mostRecentBackup == null)
 		return "";
-	string cmd = mostRecentBackup.GenerateRestoreStatement(dbName, null);
+	string cmd = mostRecentBackup.GenerateRestoreStatement(o, null);
 
-	var mostRecentDiffBackup = GetMostRecentMatchingDiffBackup(serverName, dbName, olaRootBackupFolder, restorePointInTime, mostRecentBackup.FileDate, out DateTime tlogsAfter);
+	var mostRecentDiffBackup = GetMostRecentMatchingDiffBackup(o.SourceServerName, o.SourceDbName, o.OlaRootBackupFolder, o.RestorePointInTime, mostRecentBackup.FileDate, out DateTime tlogsAfter);
 	if (mostRecentDiffBackup == null)
 	{
 		Console.WriteLine("-- No diff backup matches the given point in time, will attempt to generate restore TLog chain...");
 	}
 	else
 	{
-		cmd += mostRecentDiffBackup.GenerateRestoreStatement(dbName, restorePointInTime);		
+		cmd += mostRecentDiffBackup.GenerateRestoreStatement(o, o.RestorePointInTime);		
 	}
 
-	var tlogs = GetBackupFiles(serverName, dbName, olaRootBackupFolder, BackupType.TLOG);
-	var tlogsToApply = tlogs.Where(x => x.FileDate <= restorePointInTime && x.FileDate >= tlogsAfter).ToList();
+	var tlogs = GetBackupFiles(o.SourceServerName, o.SourceDbName, o.OlaRootBackupFolder, BackupType.TLOG);
+	var tlogsToApply = tlogs.Where(x => x.FileDate <= o.RestorePointInTime && x.FileDate >= tlogsAfter).ToList();
 	foreach (var log in tlogsToApply)
 	{
-		cmd += log.GenerateRestoreStatement(dbName, restorePointInTime);
+		cmd += log.GenerateRestoreStatement(o, o.RestorePointInTime);
 	}
 
-	cmd += $"RESTORE DATABASE [{dbName}] WITH RECOVERY";
+	cmd += $"RESTORE DATABASE [{o.TargetDbName}] WITH RECOVERY";
 	
 	return cmd;
 }
 
-public BackupFile GetMostRecentMatchingFullBackup(string serverName, string dbName, string olaRootBackupFolder, DateTime restorePointInTime)
+public BackupFile GetMostRecentMatchingFullBackup(Options o) //(string sourceServerName, string sourceDbName, string olaRootBackupFolder, DateTime restorePointInTime)
 {
-	var fullbackups = GetBackupFiles(serverName, dbName, olaRootBackupFolder, BackupType.FULL);
+	var fullbackups = GetBackupFiles(o.SourceServerName, o.SourceDbName, o.OlaRootBackupFolder, BackupType.FULL);
 	
 	if (fullbackups.Count == 0)
 	{
@@ -66,11 +88,16 @@ public BackupFile GetMostRecentMatchingFullBackup(string serverName, string dbNa
 	}
 
 	// get most recent backup file less than or equal to the specified point in time
-	var mostRecentBackup = fullbackups.Where(x => x.FileDate <= restorePointInTime).FirstOrDefault();
+	var mostRecentBackup = fullbackups.Where(x => x.FileDate <= o.RestorePointInTime).FirstOrDefault();
 	if (mostRecentBackup == null)
 	{
-		Console.WriteLine($"-- No full backup found that matches the given point in time: {restorePointInTime.ToShortDateString()}");
+		Console.WriteLine($"-- No full backup found that matches the given point in time: {o.RestorePointInTime.ToShortDateString()}");
 		return null;
+	}
+
+	if (!string.IsNullOrEmpty(o.TargetDbDataFilesLocation) && !string.IsNullOrEmpty(o.TargetDbTLogFilesLocation))
+	{
+	    mostRecentBackup.ReadDBFiles(o.TargetServerName);
 	}
 	
 	return mostRecentBackup;
@@ -131,17 +158,33 @@ public class BackupFile
 	public int FileCount;
 	public BackupType BackupType;
 
+	private List<DBFile> DBFiles;
 	public List<string> Files;
-
-	public string GenerateRestoreStatement(string dbName, DateTime? stopAt)
+	
+	public string GenerateRestoreStatement(Options o, DateTime? stopAt)
 	{
-		string s = $"RESTORE DATABASE [{dbName}] FROM " + Environment.NewLine;
+		string s = $"RESTORE DATABASE [{o.TargetDbName}] FROM " + Environment.NewLine;
 		
 		for (int i = 0; i < this.FileCount; i++)
 		{
 			s += $"   DISK = N'{Path.Combine(this.FilenamePath, this.Files[i])}'{((i != this.FileCount - 1) ? "," : "")}" + Environment.NewLine;
 		}
-		s += " WITH NORECOVERY" + ((BackupType == BackupType.FULL) ? ", REPLACE" : "");
+		s += " WITH NORECOVERY" + ((BackupType == BackupType.FULL) ? ", REPLACE" : "") + Environment.NewLine;
+
+		if (DBFiles != null)
+		{
+			foreach (var f in DBFiles)
+			{
+				if (f.Type == "L")
+				{
+					s += $"  , MOVE = '{f.LogicalName}' TO {Path.Combine(o.TargetDbTLogFilesLocation, Path.GetFileName(f.PhysicalName))}" + Environment.NewLine;
+				}
+				else
+				{
+					s += $"  , MOVE = '{f.LogicalName}' TO {Path.Combine(o.TargetDbDataFilesLocation, Path.GetFileName(f.PhysicalName))}" + Environment.NewLine;
+				}
+			}
+		}
 
 		if (stopAt.HasValue && BackupType == BackupType.TLOG)
 		{
@@ -151,6 +194,11 @@ public class BackupFile
 		s += Environment.NewLine + Environment.NewLine;
 
 		return s;
+	}
+	
+	public void ReadDBFiles(string targetServername)
+	{
+		DBFiles = GetDBFileList(targetServername, Path.Combine(this.FilenamePath, this.Files[0]));
 	}
 }
 
@@ -250,4 +298,97 @@ public List<BackupFile> GetBackupFiles(string serverName, string dbName, string 
 	}
 
 	return result.OrderByDescending(o => o.FileDate).ToList();
+}
+
+public static List<DBFile> GetDBFileList(string targetServer, string backupFileFullPath)
+{
+	DataTable dt = GetDBFiles(targetServer, backupFileFullPath);
+
+	var results = dt.AsEnumerable()
+					.Select(row =>
+							new DBFile
+							{
+								LogicalName = row.Field<string>("LogicalName"),
+								PhysicalName = row.Field<string>("PhysicalName"),
+								Type = row.Field<string>("Type"),
+								FileGroupName = row.Field<string>("FileGroupName"),
+							})
+					.ToList();
+	return results;
+}
+
+public class DBFile
+{
+	public string LogicalName;
+	public string PhysicalName;
+	public string Type;
+	public string FileGroupName;
+}
+
+private static DataTable GetDBFiles(string targetServer, string backupFileFullPath)
+{
+	var dt = new DataTable();
+
+	string connectionstring = $"Server={targetServer};Database=master;Trusted_Connection=True;Persist Security Info=False;";
+
+	using (var cn = new SqlConnection(connectionstring))
+	using (SqlCommand cmd = cn.CreateCommand())
+	{
+		cmd.CommandType = CommandType.Text;
+		cmd.CommandText = "RESTORE FILELISTONLY FROM DISK = @BackupFileFullPath;";
+
+		SqlParameter backupfile = cmd.CreateParameter();
+		backupfile.ParameterName = "@BackupFileFullPath";
+		backupfile.DbType = DbType.String;
+		backupfile.Value = backupFileFullPath;
+
+		cmd.Parameters.Add(backupfile);
+
+		cn.Open();
+
+		using (IDataReader sqlDataReader = cmd.ExecuteReader())
+		{
+			dt.BeginLoadData();
+			dt.Load(sqlDataReader);
+			dt.EndLoadData();
+			dt.AcceptChanges();
+		}
+	}
+
+	return ConvertColumnDataTypes(dt);
+}
+
+private static DataTable ConvertColumnDataTypes(DataTable dt)
+{
+	bool requiresConvert = false;
+
+	foreach (DataColumn col in dt.Columns)
+	{
+		if (col.DataType == typeof(uint))
+		{
+			requiresConvert = true;
+			break;
+		}
+	}
+
+	if (!requiresConvert)
+		return dt;
+
+	DataTable dtCloned = dt.Clone();
+
+	// Change any Uint columns to int...
+	foreach (DataColumn col in dtCloned.Columns)
+	{
+		if (col.DataType == typeof(uint))
+		{
+			col.DataType = typeof(int);
+		}
+	}
+
+	foreach (DataRow row in dt.Rows)
+	{
+		dtCloned.ImportRow(row);
+	}
+
+	return dtCloned;
 }
