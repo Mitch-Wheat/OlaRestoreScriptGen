@@ -47,7 +47,6 @@ public class Options
 	public DateTime RestorePointInTime;
 } 
 
-
 public string GenerateRestoreScript(Options o)
 {
 	var mostRecentBackup = GetMostRecentMatchingFullBackup(o);
@@ -173,16 +172,11 @@ public class BackupFile
 
 		if (DBFiles != null)
 		{
+			string targetFolder;
 			foreach (var f in DBFiles)
 			{
-				if (f.Type == "L")
-				{
-					s += $"  , MOVE = '{f.LogicalName}' TO {Path.Combine(o.TargetDbTLogFilesLocation, Path.GetFileName(f.PhysicalName))}" + Environment.NewLine;
-				}
-				else
-				{
-					s += $"  , MOVE = '{f.LogicalName}' TO {Path.Combine(o.TargetDbDataFilesLocation, Path.GetFileName(f.PhysicalName))}" + Environment.NewLine;
-				}
+				targetFolder = (f.Type == "L") ? o.TargetDbTLogFilesLocation : o.TargetDbDataFilesLocation;
+				s += $"  , MOVE '{f.LogicalName}' TO '{Path.Combine(targetFolder, Path.GetFileName(f.PhysicalName))}'" + Environment.NewLine;
 			}
 		}
 
