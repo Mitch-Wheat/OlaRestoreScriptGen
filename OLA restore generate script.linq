@@ -16,6 +16,7 @@ void Main()
 	options.SourceServerName = "K7";
 	options.SourceDbName = "AdventureWorks";
 	options.OlaRootBackupFolder = @"C:\temp\Backup\";
+	options.TLogBackupFrequencyInMinutes = 10;
 	
 	options.TargetServerName = "K7";	
 	options.TargetDbName = @"Copy of AdventureWorks";
@@ -38,6 +39,7 @@ public class Options
 	public string SourceServerName;
 	public string SourceDbName;
 	public string OlaRootBackupFolder;
+	public int TLogBackupFrequencyInMinutes;
 	
 	public string TargetServerName;	
 	public string TargetDbName;
@@ -65,7 +67,7 @@ public string GenerateRestoreScript(Options o)
 	}
 
 	var tlogs = GetBackupFiles(o.SourceServerName, o.SourceDbName, o.OlaRootBackupFolder, BackupType.TLOG);
-	var tlogsToApply = tlogs.Where(x => x.FileDate <= o.RestorePointInTime && x.FileDate >= tlogsAfter).OrderBy(x => x.FileDate).ToList();
+	var tlogsToApply = tlogs.Where(x => x.FileDate <= o.RestorePointInTime.AddMinutes(2 * o.TLogBackupFrequencyInMinutes) && x.FileDate >= tlogsAfter).OrderBy(x => x.FileDate).ToList();
 	foreach (var log in tlogsToApply)
 	{
 		cmd += log.GenerateRestoreStatement(o, o.RestorePointInTime);
@@ -118,27 +120,6 @@ public BackupFile GetMostRecentMatchingDiffBackup(string serverName, string dbNa
 	}
 	
 	return mostRecentDiffBackup;
-}
-
-public BackupFile GetMostRecentMatchingBackup(string serverName, string dbName, string olaRootBackupFolder, DateTime restorePointInTime)
-{
-	var fullbackups = GetBackupFiles(serverName, dbName, olaRootBackupFolder, BackupType.FULL);
-
-	if (fullbackups.Count == 0)
-	{
-		Console.WriteLine("-- No full backups found.");
-		return null;
-	}
-
-	// get most recent backup file less than or equal to the specified point in time
-	var mostRecentBackup = fullbackups.Where(x => x.FileDate <= restorePointInTime).FirstOrDefault();
-	if (mostRecentBackup == null)
-	{
-		Console.WriteLine($"-- No full backup found that matches the given point in time: {restorePointInTime.ToShortDateString()}");
-		return null;
-	}
-
-	return mostRecentBackup;
 }
 
 public enum BackupType
