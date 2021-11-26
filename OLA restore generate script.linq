@@ -167,10 +167,11 @@ public class BackupFile
 		{
 			s += $"   DISK = N'{Path.Combine(this.FilenamePath, this.Files[i])}'{((i != this.FileCount - 1) ? "," : "")}" + Environment.NewLine;
 		}
-		s += " WITH NORECOVERY" + ((BackupType == BackupType.FULL) ? ", REPLACE" : "") + Environment.NewLine;
+		s += " WITH NORECOVERY" + ((BackupType == BackupType.FULL) ? ", REPLACE, STATS = 5, MAXTRANSFERSIZE = 4194302, BUFFERCOUNT = 64" : "");
 
 		if (DBFiles != null)
 		{
+			s += Environment.NewLine;			
 			string targetFolder;
 			foreach (var f in DBFiles)
 			{
