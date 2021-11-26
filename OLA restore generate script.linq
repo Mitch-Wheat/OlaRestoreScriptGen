@@ -17,8 +17,8 @@ void Main()
 	options.SourceDbName = "AdventureWorks";
 	options.OlaRootBackupFolder = @"C:\temp\Backup\";
 	
+	options.TargetServerName = "K7";	
 	options.TargetDbName = @"Copy of AdventureWorks";
-	options.TargetServerName = "K7";		
 	options.TargetDbDataFilesLocation = @"C:\TempSqlDataFiles\DATA";  // null or empty means same folder structure as source
 	options.TargetDbTLogFilesLocation = @"C:\TempSqlDataFiles\LOGS";  // null or empty means same folder structure as source
 
@@ -65,7 +65,7 @@ public string GenerateRestoreScript(Options o)
 	}
 
 	var tlogs = GetBackupFiles(o.SourceServerName, o.SourceDbName, o.OlaRootBackupFolder, BackupType.TLOG);
-	var tlogsToApply = tlogs.Where(x => x.FileDate <= o.RestorePointInTime && x.FileDate >= tlogsAfter).ToList();
+	var tlogsToApply = tlogs.Where(x => x.FileDate <= o.RestorePointInTime && x.FileDate >= tlogsAfter).OrderBy(x => x.FileDate).ToList();
 	foreach (var log in tlogsToApply)
 	{
 		cmd += log.GenerateRestoreStatement(o, o.RestorePointInTime);
@@ -140,7 +140,6 @@ public BackupFile GetMostRecentMatchingBackup(string serverName, string dbName, 
 
 	return mostRecentBackup;
 }
-
 
 public enum BackupType
 {
