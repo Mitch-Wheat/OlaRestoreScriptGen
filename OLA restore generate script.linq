@@ -1,4 +1,7 @@
-<Query Kind="Program" />
+<Query Kind="Program">
+  <Reference>&lt;RuntimeDirectory&gt;\System.Numerics.dll</Reference>
+  <Namespace>System.Numerics</Namespace>
+</Query>
 
 void Main()
 {
@@ -8,7 +11,7 @@ void Main()
 	// Procedure:
 	// 1. Find most recent FULL backup less than or equal to the specified date
 	// 2. Look for any Differential backups after the FULL backup date; if found apply the latest DIFF backup less than or equal to the specified date
-	// 3. Apply any TLOG backups up to the specified date 
+	// 3. Apply TLOG backups up to the specified date 
 	// 4. Take database out of recovery mode.
 	
 	var options = new Options();
@@ -16,7 +19,6 @@ void Main()
 	options.SourceServerName = "K7";
 	options.SourceDbName = "AdventureWorks";
 	options.OlaRootBackupFolder = @"C:\temp\Backup\";
-	options.TLogBackupFrequencyInMinutes = 10;
 	
 	options.TargetServerName = "K7";	
 	options.TargetDbName = @"Copy of AdventureWorks";
@@ -39,7 +41,6 @@ public class Options
 	public string SourceServerName;
 	public string SourceDbName;
 	public string OlaRootBackupFolder;
-	public int TLogBackupFrequencyInMinutes;
 	
 	public string TargetServerName;	
 	public string TargetDbName;
@@ -51,23 +52,24 @@ public class Options
 
 public string GenerateRestoreScript(Options o)
 {
-	var mostRecentBackup = GetMostRecentMatchingFullBackup(o);
-	if (mostRecentBackup == null)
-		return "";
+	BackupFile mostRecentBackup = GetMostRecentMatchingFullBackup(o);
+	if (mostRecentBackup == null) return "";
 	string cmd = mostRecentBackup.GenerateRestoreStatement(o, null);
+	
+	BackupFile lastRestoredBackup = mostRecentBackup;
 
-	var mostRecentDiffBackup = GetMostRecentMatchingDiffBackup(o.SourceServerName, o.SourceDbName, o.OlaRootBackupFolder, o.RestorePointInTime, mostRecentBackup.FileDate, out DateTime tlogsAfter);
+	var mostRecentDiffBackup = GetMostRecentMatchingDiffBackup(o, mostRecentBackup);
 	if (mostRecentDiffBackup == null)
 	{
-		Console.WriteLine("-- No diff backup matches the given point in time, will attempt to generate restore TLog chain...");
+		Console.WriteLine("-- No diff backup found that matches the given point in time, will attempt to generate restore TLog chain...");
 	}
 	else
 	{
-		cmd += mostRecentDiffBackup.GenerateRestoreStatement(o, o.RestorePointInTime);		
+		cmd += mostRecentDiffBackup.GenerateRestoreStatement(o, o.RestorePointInTime);	
+		lastRestoredBackup = mostRecentDiffBackup;
 	}
 
-	var tlogs = GetBackupFiles(o.SourceServerName, o.SourceDbName, o.OlaRootBackupFolder, BackupType.TLOG);
-	var tlogsToApply = tlogs.Where(x => x.FileDate <= o.RestorePointInTime.AddMinutes(2 * o.TLogBackupFrequencyInMinutes) && x.FileDate >= tlogsAfter).OrderBy(x => x.FileDate).ToList();
+	var tlogsToApply = GetTLogsToApply(o, lastRestoredBackup);
 	foreach (var log in tlogsToApply)
 	{
 		cmd += log.GenerateRestoreStatement(o, o.RestorePointInTime);
@@ -78,7 +80,24 @@ public string GenerateRestoreScript(Options o)
 	return cmd;
 }
 
-public BackupFile GetMostRecentMatchingFullBackup(Options o) //(string sourceServerName, string sourceDbName, string olaRootBackupFolder, DateTime restorePointInTime)
+public List<BackupFile> GetTLogsToApply(Options o, BackupFile lastRestoredBackup)
+{
+	var tlogsAll = GetBackupFiles(o.SourceServerName, o.SourceDbName, o.OlaRootBackupFolder, BackupType.TLOG).OrderBy(x => x.FileDate).ToList();;
+	
+	decimal LastLSN = lastRestoredBackup.HeaderInfo.LastLSN;	
+	
+	tlogsAll.ForEach(x => x.ReadHeaderInfo(o.SourceServerName));
+	
+	var FirstTlogToApply = tlogsAll.Where(x => LastLSN >= x.HeaderInfo.FirstLSN && LastLSN <= x.HeaderInfo.LastLSN).FirstOrDefault();
+
+	var tlogsToApply = tlogsAll.Where(x => x.HeaderInfo.BackupStartDate <= o.RestorePointInTime && x.FileDate >= FirstTlogToApply.HeaderInfo.BackupStartDate)
+							.OrderBy(x => x.FileDate)
+							.ToList();
+	
+	return tlogsToApply;
+}
+
+public BackupFile GetMostRecentMatchingFullBackup(Options o)
 {
 	var fullbackups = GetBackupFiles(o.SourceServerName, o.SourceDbName, o.OlaRootBackupFolder, BackupType.FULL);
 	
@@ -101,24 +120,30 @@ public BackupFile GetMostRecentMatchingFullBackup(Options o) //(string sourceSer
 	    mostRecentBackup.ReadDBFiles(o.TargetServerName);
 	}
 	
+	mostRecentBackup.ReadHeaderInfo(o.TargetServerName);
+	
 	return mostRecentBackup;
 }
 
-public BackupFile GetMostRecentMatchingDiffBackup(string serverName, string dbName, string olaRootBackupFolder, DateTime restorePointInTime, DateTime mostRecentBackupDatetime, out DateTime tlogsAfter)
+public BackupFile GetMostRecentMatchingDiffBackup(Options o, BackupFile fullBackup)
 {
-	var diffbackups = GetBackupFiles(serverName, dbName, olaRootBackupFolder, BackupType.DIFF);
+	var diffbackups = GetBackupFiles(o.SourceServerName, o.SourceDbName, o.OlaRootBackupFolder, BackupType.DIFF);
 	BackupFile mostRecentDiffBackup = null;
 
-	if (diffbackups.Count > 0)
-	{
-		mostRecentDiffBackup = diffbackups.Where(x => x.FileDate <= restorePointInTime && x.FileDate >= mostRecentBackupDatetime).FirstOrDefault();
-		tlogsAfter = mostRecentDiffBackup.FileDate;
-	}
-	else
-	{
-		tlogsAfter = mostRecentBackupDatetime;
-	}
+	mostRecentDiffBackup = diffbackups.Where(x => x.FileDate <= o.RestorePointInTime && x.FileDate >= fullBackup.FileDate).FirstOrDefault();
 	
+	if (mostRecentDiffBackup != null)
+	{
+		mostRecentDiffBackup.ReadHeaderInfo(o.SourceServerName);
+
+		// check valid...
+		if (mostRecentDiffBackup.HeaderInfo.DatabaseBackupLSN != fullBackup.HeaderInfo.CheckpointLSN)
+		{
+			// Doesn't match
+			Console.WriteLine("-- Diff backup does not match Full backup.");
+		}
+	}
+
 	return mostRecentDiffBackup;
 }
 
@@ -139,6 +164,7 @@ public class BackupFile
 
 	private List<DBFile> DBFiles;
 	public List<string> Files;
+	public BackupFileInfo HeaderInfo;
 	
 	public string GenerateRestoreStatement(Options o, DateTime? stopAt)
 	{
@@ -174,6 +200,11 @@ public class BackupFile
 	public void ReadDBFiles(string targetServername)
 	{
 		DBFiles = GetDBFileList(targetServername, Path.Combine(this.FilenamePath, this.Files[0]));
+	}
+
+	public void ReadHeaderInfo(string targetServername)
+	{
+		HeaderInfo = GetBackupFileInfo(targetServername, Path.Combine(this.FilenamePath, this.Files[0]));
 	}
 }
 
@@ -330,40 +361,89 @@ private static DataTable GetDBFiles(string targetServer, string backupFileFullPa
 		}
 	}
 
-	return ConvertColumnDataTypes(dt);
+	return dt;
 }
 
-private static DataTable ConvertColumnDataTypes(DataTable dt)
+public class BackupFileInfo
 {
-	bool requiresConvert = false;
+	public string BackupName;
+	public string BackupDescription;
+	public int BackupType;
+	public int Compressed;
+	public int Position;
+	public string ServerName;
+	public string DatabaseName;
+	public long BackupSize;
+	public decimal FirstLSN;
+	public decimal LastLSN;
+	public decimal CheckpointLSN;
+	public decimal DatabaseBackupLSN;
+	public DateTime BackupStartDate;
+	public DateTime BackupFinishDate;
+	public int CompatibilityLevel;
+	public string MachineName;
+	public int Flags;
+}
 
-	foreach (DataColumn col in dt.Columns)
+public static BackupFileInfo GetBackupFileInfo(string targetServer, string backupFileFullPath)
+{
+	DataTable dt = GetBackupFileInfoFromHeader(targetServer, backupFileFullPath);
+
+	var row = dt.AsEnumerable().FirstOrDefault();
+
+	BackupFileInfo result = new BackupFileInfo
 	{
-		if (col.DataType == typeof(uint))
+		BackupName = row.Field<string>("BackupName"),
+		BackupDescription = row.Field<string>("BackupDescription"),
+		BackupType = row.Field<byte>("BackupType"),
+		Compressed = row.Field<byte>("Compressed"),
+		Position = row.Field<short>("Position"),
+		ServerName = row.Field<string>("ServerName"),
+		DatabaseName = row.Field<string>("DatabaseName"),
+		BackupSize = row.Field<long>("BackupSize"),
+		FirstLSN = row.Field<decimal>("FirstLSN"),
+		LastLSN = row.Field<decimal>("LastLSN"),
+		CheckpointLSN = row.Field<decimal>("CheckpointLSN"),
+		DatabaseBackupLSN = row.Field<decimal>("DatabaseBackupLSN"),
+		BackupStartDate = row.Field<DateTime>("BackupStartDate"),
+		BackupFinishDate = row.Field<DateTime>("BackupFinishDate"),
+		CompatibilityLevel = row.Field<byte>("CompatibilityLevel"),
+		MachineName = row.Field<string>("MachineName"),
+		Flags = row.Field<int>("Flags")
+	};
+
+	return result;
+}
+
+private static DataTable GetBackupFileInfoFromHeader(string targetServer, string backupFileFullPath)
+{
+	var dt = new DataTable();
+
+	string connectionstring = $"Server={targetServer};Database=master;Trusted_Connection=True;Persist Security Info=False;";
+
+	using (var cn = new SqlConnection(connectionstring))
+	using (SqlCommand cmd = cn.CreateCommand())
+	{
+		cmd.CommandType = CommandType.Text;
+		cmd.CommandText = "RESTORE HEADERONLY FROM DISK = @BackupFileFullPath;";
+
+		SqlParameter backupfile = cmd.CreateParameter();
+		backupfile.ParameterName = "@BackupFileFullPath";
+		backupfile.DbType = DbType.String;
+		backupfile.Value = backupFileFullPath;
+
+		cmd.Parameters.Add(backupfile);
+
+		cn.Open();
+
+		using (IDataReader sqlDataReader = cmd.ExecuteReader())
 		{
-			requiresConvert = true;
-			break;
+			dt.BeginLoadData();
+			dt.Load(sqlDataReader);
+			dt.EndLoadData();
+			dt.AcceptChanges();
 		}
 	}
 
-	if (!requiresConvert)
-		return dt;
-
-	DataTable dtCloned = dt.Clone();
-
-	// Change any Uint columns to int...
-	foreach (DataColumn col in dtCloned.Columns)
-	{
-		if (col.DataType == typeof(uint))
-		{
-			col.DataType = typeof(int);
-		}
-	}
-
-	foreach (DataRow row in dt.Rows)
-	{
-		dtCloned.ImportRow(row);
-	}
-
-	return dtCloned;
+	return dt;
 }
